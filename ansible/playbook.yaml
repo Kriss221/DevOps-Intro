@@ -14,6 +14,7 @@
 
     binary_path: /usr/local/bin/quicknotes
     listen_addr: ":8080"
+    restart_backoff: "3s"
 
     ansible_pull_repo_url: "https://github.com/Kriss221/DevOps-Intro.git"
     ansible_pull_branch: "feature/lab7"

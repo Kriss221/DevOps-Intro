@@ -16,7 +16,7 @@ Environment="SEED_PATH={{ seed_path }}"
 ExecStart={{ binary_path }}
 
 Restart=on-failure
-RestartSec=2s
+RestartSec={{ restart_backoff }}
 
 [Install]
 WantedBy=multi-user.target
