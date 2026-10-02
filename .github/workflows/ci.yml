@@ -148,6 +148,52 @@ jobs:
         if: steps.lint-changes.outputs.run_lint != 'true'
         run: echo "Only Markdown documentation under app/ changed; lint skipped."
 
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.24'
+          cache: true
+          cache-dependency-path: app/go.mod
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+
+      - name: Run govulncheck
+        working-directory: app
+        run: ~/go/bin/govulncheck ./...
+
+
+  govulncheck-demo:
+    name: govulncheck-demo
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: '1.25.13'
+          cache: true
+          cache-dependency-path: app/go.mod
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+
+      - name: Run govulncheck demo
+        working-directory: app
+        run: ~/go/bin/govulncheck ./...
+
   ci-ok:
     name: ci-ok
     if: always()
@@ -155,6 +201,7 @@ jobs:
       - vet
       - test
       - lint
+      - govulncheck
     runs-on: ubuntu-24.04
 
     steps:
