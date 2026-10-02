@@ -193,7 +193,7 @@ Total: 0 (HIGH: 0, CRITICAL: 0)
 
 This provides before/after evidence that the Go standard-library HIGH findings were removed.
 
-> The final commit/PR link for this FIX will be added before submission.
+The FIX is included in [PR #1725](https://github.com/inno-devops-labs/DevOps-Intro/pull/1725).
 
 ## Design Questions
 
@@ -347,7 +347,7 @@ reports/lab9/zap-health-after.html
 reports/lab9/zap-health-after.json
 ```
 
-> The final commit/PR link for the code fix will be added before submission.
+The security-header code fix is included in [PR #1725](https://github.com/inno-devops-labs/DevOps-Intro/pull/1725).
 
 ## Task 2 Design Questions
 
@@ -362,3 +362,134 @@ Middleware applies the security policy consistently to every route, including er
 ### g. What is the cost of accepting all informational ZAP findings without reading them?
 
 Automatically accepting informational findings can hide real configuration weaknesses and removes the value of security triage. Informational findings may expose conditions that become important when combined with other vulnerabilities. Each finding should therefore be reviewed and given an explicit decision based on its actual context.
+
+---
+
+## Bonus Task — govulncheck CI Gate
+
+A separate `govulncheck` job was added to the Lab 3 CI workflow.
+
+The required job uses Go 1.24 and a pinned scanner version:
+
+```yaml
+govulncheck:
+  name: govulncheck
+  runs-on: ubuntu-24.04
+
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+    - name: Set up Go
+      uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+      with:
+        go-version: '1.24'
+        cache: true
+        cache-dependency-path: app/go.mod
+
+    - name: Install govulncheck
+      run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+
+    - name: Run govulncheck
+      working-directory: app
+      run: ~/go/bin/govulncheck ./...
+```
+
+The job is also included in the final `ci-ok` gate.
+
+### Real Go 1.24 findings
+
+The required Go 1.24 job currently detects reachable vulnerabilities in the Go 1.24.13 standard library.
+
+Example:
+
+```text
+Vulnerability #10: GO-2026-4870
+Unauthenticated TLS 1.3 KeyUpdate record can cause persistent connection
+retention and DoS in crypto/tls
+
+Found in: crypto/tls@go1.24.13
+Fixed in: crypto/tls@go1.25.9
+
+Example traces found:
+#1: main.go:37:31: quicknotes.main calls http.Server.ListenAndServe,
+    which eventually calls tls.Conn.HandshakeContext
+```
+
+The scan reports:
+
+```text
+Your code is affected by 12 vulnerabilities from the Go standard library.
+```
+
+This is a real security-gate failure rather than a CI configuration error.
+
+### Vulnerable dependency demonstration
+
+Because the required Go 1.24 job already fails on real standard-library vulnerabilities, a separate temporary `govulncheck-demo` job using Go 1.25.13 was used only to demonstrate the required clean → vulnerable → clean transition.
+
+A deliberately vulnerable dependency was introduced:
+
+```text
+golang.org/x/text v0.3.5
+```
+
+A reachable call was added to:
+
+```go
+language.Parse("en")
+```
+
+`govulncheck` detected:
+
+```text
+Vulnerability #1: GO-2021-0113
+Out-of-bounds read in golang.org/x/text/language
+
+Module: golang.org/x/text
+Found in: golang.org/x/text@v0.3.5
+Fixed in: golang.org/x/text@v0.3.7
+
+Example traces found:
+#1: vuln_demo.go:6:23:
+    quicknotes.vulnerableDependencyDemo calls language.Parse
+
+Your code is affected by 1 vulnerability from 1 module.
+```
+
+The CI behavior was:
+
+```text
+Clean baseline:
+govulncheck-demo ✅
+
+After vulnerable dependency was introduced:
+govulncheck-demo ❌
+
+After reverting the vulnerable dependency:
+govulncheck-demo ✅
+```
+
+The vulnerable dependency was committed only temporarily for CI demonstration and was then reverted.
+
+### Bonus Design Questions
+
+#### h. How is “this module has a CVE but we do not call the affected function” different from “this module has a CVE”?
+
+A module can contain a vulnerable function without the application ever reaching that function. Module-presence scanners therefore produce a larger set of potential findings. `govulncheck` analyzes the call graph and distinguishes vulnerabilities that are actually reachable from application code. This reduces triage workload because reachable vulnerabilities can be prioritized over vulnerabilities in unused code paths.
+
+#### i. Why pin the version of govulncheck instead of using `@latest`?
+
+Pinning the scanner makes CI reproducible. A new scanner release can change vulnerability data handling, output, behavior, or introduce regressions. If CI always installs `@latest`, the same commit may pass one day and fail another without any code change. A pinned version makes changes to the security tool explicit and reviewable.
+
+#### j. What does govulncheck not catch that Trivy image scanning can catch?
+
+`govulncheck` only analyzes Go code, Go modules, the Go standard library, and reachable Go call paths. It does not inspect operating-system packages, container base-image packages, binaries installed outside the Go module graph, Docker configuration, secrets, or other language ecosystems. Trivy image scanning can detect vulnerabilities in those container and OS components even when they are unrelated to Go dependencies.
+
+### Red CI run
+
+![govulncheck demo failing on vulnerable dependency](images/lab9-govulncheck-red.jpg)
+
+### Green CI run after revert
+
+![govulncheck demo passing after revert](images/lab9-govulncheck-green.jpg)
