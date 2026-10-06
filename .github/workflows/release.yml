@@ -41,3 +41,16 @@ jobs:
 
           docker push "${IMAGE}:${VERSION}"
           docker push "${IMAGE}:latest"
+
+      - name: Deploy to Render
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}/quicknotes"
+          VERSION="${GITHUB_REF_NAME}"
+
+          curl --fail-with-body --silent --show-error \
+            --get \
+            --data-urlencode "imgURL=${IMAGE}:${VERSION}" \
+            "${RENDER_DEPLOY_HOOK_URL}"
+
