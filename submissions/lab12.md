@@ -520,3 +520,206 @@ This makes attacks that depend on escaping an application into the underlying ho
 Docker containers are isolated mainly through Linux mechanisms such as namespaces, cgroups, capabilities, and seccomp. A container still shares the host kernel, so a successful kernel or container-runtime escape can potentially cross that isolation boundary.
 
 WASM places an additional host/runtime boundary between guest code and operating-system resources, reducing the default attack surface for mutually untrusted multi-tenant workloads.
+
+# Bonus Task — Two WASM Execution Models
+
+## Standalone WASI CLI module
+
+A second implementation of the Moscow-time logic was created in:
+
+```text
+wasm-cli/main.go
+```
+
+Unlike the Spin version, this program does not use the Spin SDK. It reads request-like information from environment variables and writes the JSON response directly to stdout.
+
+```go
+package main
+
+import (
+	"fmt"
+	"os"
+	"time"
+)
+
+func main() {
+	method := os.Getenv("REQUEST_METHOD")
+	path := os.Getenv("PATH_INFO")
+
+	if method != "GET" {
+		fmt.Fprintln(os.Stderr, "only GET is supported")
+		os.Exit(1)
+	}
+
+	if path != "/time" {
+		fmt.Fprintln(os.Stderr, "unknown path")
+		os.Exit(1)
+	}
+
+	moscow := time.Now().UTC().Add(3 * time.Hour)
+
+	iso := moscow.Format("2006-01-02T15:04:05") + "+03:00"
+	hourMinute := moscow.Format("15:04")
+
+	fmt.Printf(
+		"{\"unix\":%d,\"iso\":%q,\"hour_minute\":%q,\"timezone\":\"UTC+3\"}\n",
+		moscow.Unix(),
+		iso,
+		hourMinute,
+	)
+}
+```
+
+---
+
+## Build
+
+The standalone module was built with the command required by the lab:
+
+```bash
+tinygo build -o wasm-cli/main.wasm -target=wasi -no-debug ./wasm-cli/main.go
+```
+
+The build completed successfully.
+
+Artifact size:
+
+```text
+wasm-cli/main.wasm 189296 bytes
+```
+
+For comparison, the Spin wasi-http component was:
+
+```text
+wasm/moscow-time/main.wasm 382252 bytes
+```
+
+The standalone CLI module was therefore approximately half the size of the Spin HTTP component.
+
+---
+
+## Run with bare Wasmtime
+
+Runtime version:
+
+```text
+wasmtime 49.0.2
+```
+
+The module was executed using:
+
+```bash
+wasmtime run \
+  --env REQUEST_METHOD=GET \
+  --env PATH_INFO=/time \
+  wasm-cli/main.wasm
+```
+
+Output:
+
+```json
+{"unix":1792018779,"iso":"2026-10-14T22:59:39+03:00","hour_minute":"22:59","timezone":"UTC+3"}
+```
+
+This demonstrates that the standalone module can run directly under bare `wasmtime run` without Spin.
+
+---
+
+## Cold-start comparison
+
+Ten separate `wasmtime run` invocations were measured:
+
+```text
+21 ms
+19 ms
+24 ms
+23 ms
+21 ms
+19 ms
+20 ms
+20 ms
+21 ms
+20 ms
+```
+
+Median:
+
+```text
+wasmtime run p50 = 20.5 ms
+```
+
+The Spin runtime cold-start measurement from Task 2 was:
+
+```text
+Spin cold-start p50 = 116 ms
+```
+
+Comparison:
+
+| Dimension | Spin wasi-http | Standalone WASI CLI |
+|---|---:|---:|
+| Module size | 382,252 bytes | 189,296 bytes |
+| Cold/per-invocation start p50 | 116 ms | 20.5 ms |
+| Execution model | Persistent HTTP server | One process-style invocation per request |
+
+The two timings represent different execution models. Spin starts a persistent HTTP runtime and prepares the wasi-http component to serve multiple requests. In the standalone model, every `wasmtime run` executes one CLI invocation and exits.
+
+---
+
+## Bonus Design Questions
+
+### h) Why can't the Task 1 Spin component run under bare `wasmtime run`?
+
+The Spin component and the standalone CLI module expose different execution interfaces.
+
+The standalone WASI CLI module behaves like a command-line program. It has a normal program entrypoint and is designed to be started directly using:
+
+```text
+wasmtime run
+```
+
+The Spin component is instead built as a wasi-http component. Its job is to export an HTTP handler interface that a wasi-http host can call.
+
+It is not structured as a standalone command whose main purpose is to execute through a `_start`-style CLI entrypoint and terminate.
+
+Therefore bare `wasmtime run` does not provide the HTTP hosting environment that the Spin component expects.
+
+A wasi-http-aware host such as Spin, or a compatible Wasmtime HTTP hosting mode, is required to invoke that HTTP handler.
+
+### i) What does Spin add on top of Wasmtime?
+
+Spin uses Wasmtime as its WebAssembly execution engine, but adds the application platform around it.
+
+Spin provides the wasi-http server loop, HTTP routing from `spin.toml`, lifecycle management for components, and management of component instances.
+
+It also applies application-level policies such as:
+
+```toml
+allowed_outbound_hosts = []
+```
+
+which controls which outbound hosts a component is permitted to access.
+
+Spin can therefore turn a WASM component into a long-running HTTP application, while bare Wasmtime primarily provides the lower-level execution runtime.
+
+Spin also manages functionality such as instance reuse or pooling and the mapping between incoming HTTP requests and component handlers.
+
+### j) When does each execution model fit?
+
+The per-invocation `wasmtime run` model fits one-shot or batch-style workloads.
+
+For example, a small transformation job could be executed once for each input, produce an output, and terminate. A CGI-like request model is another possible use case.
+
+The Spin model fits persistent network services.
+
+For example, the `/time` HTTP endpoint benefits from Spin remaining alive, listening for requests, routing them to the WASM component, and serving many requests without starting a new operating-system command for every request.
+
+Therefore:
+
+```text
+wasmtime run:
+good fit for one-shot, CLI, batch, or event-style execution
+
+Spin:
+good fit for persistent HTTP APIs and serverless-style web services
+```
