@@ -279,3 +279,244 @@ time.Now().UTC().Add(3 * time.Hour)
 Another known TinyGo limitation for this type of application is reflection-heavy JSON serialization such as `encoding/json` with `map[string]any`.
 
 To keep the component simple and robust under TinyGo, the JSON response was generated explicitly using `fmt.Fprintf`.
+
+# Task 2 — Performance Comparison vs Lab 6 Container
+
+## Test rig
+
+Measurements were performed on the following machine:
+
+```text
+Hardware: HUAWEI BOHK-WAX9X laptop
+CPU: AMD Ryzen 5 3500U with Radeon Vega Mobile Gfx
+CPU threads: 8
+Architecture: x86_64
+Operating system: Ubuntu 24.04.5 LTS
+Kernel: Linux 7.0.0-38-generic
+Spin: 3.4.1
+TinyGo: 0.42.0
+Go: 1.27.1
+hyperfine: 1.18.0
+```
+
+The Lab 6 baseline used the original `feature/lab6` Dockerfile and was built as:
+
+```bash
+docker build -t quicknotes:lab6 /tmp/devops-lab6/app
+```
+
+The Spin endpoint was the `/time` component produced in Task 1.
+
+---
+
+## Artifact size
+
+Lab 6 Docker image:
+
+```bash
+docker image inspect quicknotes:lab6 --format 'size={{.Size}} id={{.Id}}'
+```
+
+Output:
+
+```text
+size=13821082
+id=sha256:6e1aa200087ba911c757fd7489b3eb8c95958f938096b75fc73246dc0c564997
+```
+
+Spin WebAssembly module:
+
+```bash
+stat -c 'size=%s bytes' wasm/moscow-time/main.wasm
+```
+
+Output:
+
+```text
+size=382252 bytes
+```
+
+Therefore:
+
+```text
+Lab 6 Docker image: 13,821,082 bytes
+Spin WASM module:      382,252 bytes
+```
+
+The WASM artifact is approximately 36 times smaller than the Docker image in this comparison.
+
+---
+
+## Warm latency
+
+Both services were already running before the measurements.
+
+Spin:
+
+```bash
+hyperfine --warmup 5 --runs 50 \
+  --export-json /tmp/spin-warm.json \
+  'curl -s -o /dev/null http://127.0.0.1:3000/time'
+```
+
+Result:
+
+```text
+Time (mean ± σ): 13.8 ms ± 1.7 ms
+Range:            11.8 ms … 20.5 ms
+```
+
+Calculated percentiles:
+
+```text
+Spin p50 = 13.571 ms
+Spin p95 = 17.623 ms
+```
+
+Docker:
+
+```bash
+hyperfine --warmup 5 --runs 50 \
+  --export-json /tmp/docker-warm.json \
+  'curl -s -o /dev/null http://127.0.0.1:18080/health'
+```
+
+Result:
+
+```text
+Time (mean ± σ): 12.3 ms ± 1.9 ms
+Range:            10.1 ms … 18.7 ms
+```
+
+Calculated percentiles:
+
+```text
+Docker p50 = 11.875 ms
+Docker p95 = 16.727 ms
+```
+
+In this test the already-running Docker service had slightly lower warm request latency than the Spin endpoint.
+
+---
+
+## Cold start
+
+Cold start was measured from runtime launch until the first successful HTTP 200 response.
+
+Five independent samples were collected for each runtime.
+
+### Spin
+
+```text
+Run 1: 116 ms
+Run 2: 107 ms
+Run 3: 125 ms
+Run 4: 115 ms
+Run 5: 123 ms
+```
+
+Sorted:
+
+```text
+107, 115, 116, 123, 125 ms
+```
+
+Median:
+
+```text
+Spin cold-start p50 = 116 ms
+```
+
+### Docker
+
+```text
+Run 1: 745 ms
+Run 2: 676 ms
+Run 3: 667 ms
+Run 4: 671 ms
+Run 5: 669 ms
+```
+
+Sorted:
+
+```text
+667, 669, 671, 676, 745 ms
+```
+
+Median:
+
+```text
+Docker cold-start p50 = 671 ms
+```
+
+In this experiment Spin reached its first successful response approximately 5.8 times faster than the Lab 6 Docker container.
+
+---
+
+## Performance table
+
+| Dimension | Lab 6 Docker | Lab 12 WASM/Spin |
+|---|---:|---:|
+| Artifact size | 13,821,082 bytes (~13.8 MB) | 382,252 bytes (~374 KiB) |
+| Cold start (p50) | 671 ms | 116 ms |
+| Warm latency p50 | 11.875 ms | 13.571 ms |
+| Warm latency p95 | 16.727 ms | 17.623 ms |
+
+The measurements show that the WASM module is substantially smaller and starts much faster on this machine, while the already-running Docker service was slightly faster for warm HTTP requests.
+
+---
+
+## Task 2 Design Questions
+
+### e) What dominates each platform's cold start?
+
+For the Docker container, cold start includes more operating-system-level setup.
+
+The runtime must create and configure the container environment, including namespaces and other container runtime state, and start the containerized process. Depending on the state of the image, image and filesystem preparation can also contribute.
+
+For Spin, the main work is loading the WebAssembly module and instantiating it through Wasmtime so that the HTTP component is ready to serve requests.
+
+This difference is visible in the measurements:
+
+```text
+Docker cold-start p50: 671 ms
+Spin cold-start p50:   116 ms
+```
+
+The Spin component therefore had substantially less startup overhead in this test.
+
+### f) For what workloads is WASM clearly better, and where is Docker still the right choice?
+
+WASM is especially attractive for small, short-lived, highly isolated workloads where startup time and artifact size matter.
+
+Examples include:
+
+- serverless functions;
+- edge functions;
+- lightweight HTTP handlers;
+- multi-tenant plugin systems;
+- workloads that scale rapidly from zero.
+
+The very small module and fast startup measured in this lab demonstrate those advantages.
+
+Docker is still a better fit when an application expects a full Linux-like environment, requires arbitrary native binaries or system packages, depends heavily on operating-system facilities, or consists of existing software that would be difficult to port to WASI.
+
+Containers also have a much larger and more mature ecosystem and can run applications without requiring them to target the WASI execution model.
+
+### g) How does WASM improve multi-tenant safety?
+
+A WebAssembly component executes inside a capability sandbox. It does not automatically receive unrestricted access to the host filesystem, network, processes, or other operating-system resources.
+
+For example, the Spin component in this lab explicitly has:
+
+```toml
+allowed_outbound_hosts = []
+```
+
+so it receives no outbound HTTP capability.
+
+This makes attacks that depend on escaping an application into the underlying host environment harder. For example, malicious application code cannot simply open arbitrary host files or connect to arbitrary internal network services unless the host has explicitly granted those capabilities.
+
+Docker containers are isolated mainly through Linux mechanisms such as namespaces, cgroups, capabilities, and seccomp. A container still shares the host kernel, so a successful kernel or container-runtime escape can potentially cross that isolation boundary.
+
+WASM places an additional host/runtime boundary between guest code and operating-system resources, reducing the default attack surface for mutually untrusted multi-tenant workloads.
