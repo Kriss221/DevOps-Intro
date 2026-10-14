@@ -573,3 +573,227 @@ Nix introduces its own language, package model, store, flakes, derivations, depe
 Dockerfiles are more widely understood and have broad support in CI systems, container registries, cloud platforms, IDEs, and deployment tooling. For many teams, writing and maintaining a Dockerfile is simpler than introducing Nix.
 
 Therefore `docker build` remains the common default because of its familiarity and ecosystem support, while Nix provides stronger control over build inputs and reproducibility at the cost of a steeper learning curve and additional tooling.
+
+# Bonus Task — CI-Verified Reproducibility
+
+## CI workflow
+
+A GitHub Actions workflow was added at:
+
+```text
+.github/workflows/nix-repro.yml
+```
+
+The workflow runs on every push and pull request. It launches two independent build jobs on separate fresh GitHub-hosted runners.
+
+Both jobs:
+
+- check out the repository;
+- install Nix using the Determinate Nix Installer Action pinned to the 40-character commit SHA `3138316df39ed29be04236d7ffc686fa525866aa`;
+- run `nix build .#docker`;
+- compute the SHA-256 digest of the resulting image tarball;
+- expose that digest as a job output.
+
+A third `compare` job consumes both outputs and fails if they differ.
+
+The workflow is:
+
+```yaml
+name: Nix Reproducibility
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-a:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa
+
+      - name: Build OCI image
+        run: nix build .#docker
+
+      - name: Compute digest
+        id: digest
+        run: |
+          digest=$(sha256sum result | awk '{print $1}')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Build A digest: $digest"
+
+  build-b:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa
+
+      - name: Build OCI image
+        run: nix build .#docker
+
+      - name: Compute digest
+        id: digest
+        run: |
+          digest=$(sha256sum result | awk '{print $1}')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Build B digest: $digest"
+
+  compare:
+    runs-on: ubuntu-latest
+    needs:
+      - build-a
+      - build-b
+
+    steps:
+      - name: Compare digests
+        env:
+          DIGEST_A: ${{ needs.build-a.outputs.digest }}
+          DIGEST_B: ${{ needs.build-b.outputs.digest }}
+        run: |
+          echo "Build A: $DIGEST_A"
+          echo "Build B: $DIGEST_B"
+
+          if [ "$DIGEST_A" != "$DIGEST_B" ]; then
+            echo "Digest mismatch: reproducibility check failed."
+            exit 1
+          fi
+
+          echo "Digests match: reproducibility check passed."
+```
+
+---
+
+## Green CI run
+
+Final successful CI run:
+
+https://github.com/Kriss221/DevOps-Intro/actions/runs/38620300243/job/116046632337
+
+The `compare` job reported:
+
+```text
+Build A: 8867d72cfc76bd1c9303facb0d46c5eb6536becc6c624a018c98eeaa1e429251
+Build B: 8867d72cfc76bd1c9303facb0d46c5eb6536becc6c624a018c98eeaa1e429251
+Digests match: reproducibility check passed.
+```
+
+Both fresh CI runners therefore independently produced the same OCI image digest.
+
+An earlier successful run also confirmed the same result:
+
+https://github.com/Kriss221/DevOps-Intro/actions/runs/38618213925/job/116039125296
+
+---
+
+## Deliberately broken CI run
+
+To demonstrate that the CI gate can detect non-reproducibility, build A was temporarily modified so that the fixed OCI image creation timestamp was changed from:
+
+```text
+1970-01-01T00:00:01Z
+```
+
+to:
+
+```text
+1970-01-01T00:00:02Z
+```
+
+Only build A received this modification. Build B continued to build the normal flake.
+
+The resulting CI run failed in the `compare` job:
+
+https://github.com/Kriss221/DevOps-Intro/actions/runs/38619414729/job/116043136763
+
+The log showed:
+
+```text
+Build A: 00d50ef6eb424160d6e04fa9f34efd45476a952b27ad6370c6e9262abeaa9a95
+Build B: 8867d72cfc76bd1c9303facb0d46c5eb6536becc6c624a018c98eeaa1e429251
+Digest mismatch: reproducibility check failed.
+Error: Process completed with exit code 1.
+```
+
+This demonstrates that the third job detects divergent image outputs and causes the workflow to fail.
+
+The intentional modification was then removed and the following run returned to green:
+
+https://github.com/Kriss221/DevOps-Intro/actions/runs/38620300243/job/116046632337
+
+---
+
+## Bonus Design Questions
+
+### h) What is the difference between "reproducible on my laptop" and "reproducible in CI"?
+
+A reproducibility check performed only on one developer machine still shares a large amount of state between builds.
+
+For example, both builds may use the same Nix store, filesystem, environment, caches, configuration, and host system. A result that is repeatable on one machine therefore does not prove that another independent environment can reproduce the artifact.
+
+The CI workflow uses two separate fresh GitHub-hosted runners. Each runner independently checks out the repository, installs Nix, and builds the OCI image.
+
+This makes the result stronger for a security auditor because the proof is:
+
+- automated;
+- recorded in CI logs;
+- tied to a specific Git revision;
+- performed on fresh independent environments;
+- repeatable by future CI runs.
+
+The auditor therefore does not have to rely only on the developer's local machine or manually reported results.
+
+---
+
+### i) Why use two parallel jobs instead of running `nix build` twice in one job?
+
+Two builds inside a single job would share the same machine and Nix store.
+
+After the first invocation:
+
+```bash
+nix build .#docker
+```
+
+the second invocation could simply reuse an already existing store path or cached derivation instead of independently rebuilding all required outputs.
+
+That proves that Nix can retrieve the same existing artifact twice, but it is a weaker test of independent reproducibility.
+
+Two separate CI jobs use fresh runners with separate local state. Neither job can reuse the other job's local `/nix/store`.
+
+Therefore matching digests from the two jobs provide stronger evidence that the artifact can be independently reconstructed from the same declared inputs.
+
+---
+
+### j) Where can timestamps leak into the Nix image, and how does `dockerTools.buildImage` handle them?
+
+Container image metadata and files created during the build can contain timestamps.
+
+A particularly visible timestamp-sensitive field is the OCI image creation time. If the build were to use the current time, otherwise identical builds could produce different image metadata and therefore different digests.
+
+In this flake the image creation timestamp is explicitly fixed:
+
+```nix
+created = "1970-01-01T00:00:01Z";
+```
+
+Therefore the current wall-clock time is not included in that field.
+
+The image is also assembled by `dockerTools.buildImage` from Nix store inputs rather than by executing a sequence of ordinary Dockerfile layers whose commands can introduce current timestamps.
+
+Nix derivations operate from declared inputs, and the resulting image construction avoids depending on the build time when the configuration itself does not introduce such time-dependent data.
+
+The deliberately broken CI experiment demonstrated the importance of this timestamp: changing the fixed `created` value by only one second changed the resulting image SHA-256 digest.
+
+Therefore timestamp-related metadata must itself be deterministic for the complete OCI image to remain reproducible.
